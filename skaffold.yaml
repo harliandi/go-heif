@@ -1,0 +1,34 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: go-heif-api
+
+build:
+  artifacts:
+  - image: go-heif-api
+    docker:
+      dockerfile: Dockerfile
+
+deploy:
+  kubectl:
+    manifests:
+    - k8s/deployment.yaml
+    - k8s/service.yaml
+    - k8s/hpa.yaml
+
+profiles:
+# Development profile with local building
+- name: dev
+  build:
+    local:
+      push: false
+      useDockerCLI: true
+      concurrency: 0
+
+# Production profile with registry push
+- name: prod
+  build:
+    local:
+      push: true
+    # Or use google cloud build / other build options
+    # googleCloudBuild: {}
