@@ -1,19 +1,30 @@
 # HEIF to JPEG Conversion API
 
-A lightweight Go HTTP service that converts HEIF/HEIC images to JPEG format in real-time.
+A high-performance Go HTTP service that converts HEIF/HEIC images to JPEG format in real-time.
 
-## Features
+## What It Does
 
-- Converts HEIF/HEIC images to JPEG
-- Adaptive quality targeting ~500KB output size
-- Strips EXIF metadata for privacy
-- RESTful API with multipart upload
-- Kubernetes-ready with Skaffold deployment
-- Comprehensive test coverage
+- **Converts HEIF/HEIC images to JPEG** with adaptive quality targeting (~500KB default)
+- **Multiple output modes**: raw JPEG streaming (default) or base64 JSON (`?format=json`)
+- **Fast scaling**: Optional downsampling for speed (`?scale=0.5`)
+- **Privacy-focused**: Strips EXIF metadata by default
+- **RESTful API** with multipart upload support
+
+## Performance & Security Features
+
+| Feature | Description |
+|---------|-------------|
+| **Worker Pool** | Bounded goroutine pool for controlled CPU usage |
+| **Rate Limiting** | Token-bucket per IP (configurable) |
+| **Concurrency Limit** | Max simultaneous requests (prevents OOM) |
+| **Panic Recovery** | Server survives crashes, returns HTTP 500 |
+| **Security Headers** | CSP, X-Content-Type-Options, HSTS |
+| **Request Validation** | File size limit (20MB), dimension checks |
+| **Prometheus Metrics** | `/metrics` endpoint for monitoring |
 
 ## API Usage
 
-### Convert Endpoint
+### Convert (default: raw JPEG streaming)
 
 ```bash
 curl -X POST \
@@ -26,34 +37,43 @@ curl -X POST \
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `max_size` | Target output size in KB | 500 |
-| `quality` | Fixed quality (1-100), skips adaptive | - |
+| `scale` | Downsample factor (0.1-1.0) | 0.5 |
+| `quality` | Fixed quality 1-100 | adaptive |
+| `max_size` | Target size in KB | 500 |
+| `format` | `json` or binary | binary |
 
 ```bash
-# Use custom target size
-curl -X POST -F "file=@image.heic" "http://localhost:8080/convert?max_size=1000"
+# Full resolution, adaptive quality
+curl -X POST -F "file=@image.heic" "http://localhost:8080/convert?scale=1"
 
-# Use fixed quality
+# Fixed quality 90
 curl -X POST -F "file=@image.heic" "http://localhost:8080/convert?quality=90"
+
+# Base64 JSON response (legacy)
+curl -X POST -F "file=@image.heic" "http://localhost:8080/convert?format=json"
 ```
 
-### Health Check
+### Endpoints
 
-```bash
-curl http://localhost:8080/health
-# {"status":"ok"}
-```
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/convert` | POST | Convert HEIF to JPEG |
+| `/health` | GET | Health check |
+| `/metrics` | GET | Prometheus metrics |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 8080 | Server port |
+| `MAX_UPLOAD_MB` | 10 | Max upload size (MB) |
+| `TARGET_SIZE_KB` | 500 | Default output target (KB) |
+| `MAX_CONCURRENT` | 50 | Max concurrent requests |
+| `RATE_LIMIT` | 10 | Requests/sec per IP |
+| `RATE_LIMIT_BURST` | 20 | Rate limit burst |
+| `WORKER_COUNT` | 10 | Conversion worker pool size |
 
 ## Development
-
-### Prerequisites
-
-- Go 1.22+
-- Docker
-- Kubernetes cluster (for deployment)
-- Skaffold (optional, for deployment)
-
-### Run Locally
 
 ```bash
 # Run tests
@@ -61,66 +81,53 @@ go test ./...
 
 # Run server
 go run cmd/api/main.go
+
+# Build
+go build -o api ./cmd/api
 ```
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | 8080 | Server port |
-| `MAX_UPLOAD_MB` | 10 | Max upload size in MB |
-| `TARGET_SIZE_KB` | 500 | Default target output size |
 
 ## Deployment
 
-### Using Skaffold
-
 ```bash
-# Development (hot-reload)
-skaffold dev
+# Using Skaffold
+skaffold dev    # Development
+skaffold run   # Production
 
-# One-time deployment
-skaffold run
-
-# Delete deployment
-skaffold delete
-```
-
-### Using kubectl
-
-```bash
-# Build image
+# Using Docker
 docker build -t go-heif-api .
-
-# Apply manifests
 kubectl apply -f k8s/
 ```
 
-## Kubernetes Resources
+## Future Improvements
 
-| Resource | Description |
-|----------|-------------|
-| Deployment | 3 replicas, 500m CPU, 512Mi memory limit |
-| Service | ClusterIP on port 80 |
-| HPA | Auto-scales 2-10 pods based on CPU/memory |
-| Ingress | Optional, for external access |
+**Phase 3 (Enhancements):**
+- Replace nearest-neighbor scaling with bicubic/Lanczos
+- Add API key system for tiered quotas
+- Distributed rate limiting (Redis) for multi-pod deployments
+
+**Considered for Later:**
+- WebP/AVIF output format support
+- Thumbnail generation presets
+- S3/integrated storage backends
+- Authentication/OAuth integration
+- Batch conversion endpoint
 
 ## Project Structure
 
 ```
 go-heif/
-├── cmd/api/           # Main application entry point
+├── cmd/api/              # Main entry point
 ├── internal/
-│   ├── converter/     # Core conversion logic
-│   ├── handler/       # HTTP handlers
-│   ├── middleware/    # Logging middleware
-│   └── config/        # Configuration
-├── pkg/quality/       # Adaptive quality algorithm
-├── k8s/               # Kubernetes manifests
-├── testdata/          # Test files
-├── Dockerfile
-├── skaffold.yaml
-└── README.md
+│   ├── converter/        # Core conversion, worker pool, validation
+│   ├── handler/          # HTTP handlers
+│   ├── middleware/       # Security, rate limit, concurrency, logging
+│   └── config/           # Configuration
+├── pkg/
+│   ├── metrics/          # Prometheus metrics
+│   ├── quality/          # Adaptive quality algorithm
+│   └── jpeg/             # libjpeg-turbo CGO binding
+├── k8s/                  # Kubernetes manifests
+└── testdata/             # Test files
 ```
 
 ## License

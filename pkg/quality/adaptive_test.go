@@ -1,10 +1,29 @@
 package quality
 
 import (
+	"bytes"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"testing"
 )
+
+// encodeSize returns the size in bytes of encoding the image at given quality
+// This is a test helper function
+func encodeSize(img image.Image, quality int) (int, error) {
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
+		return 0, err
+	}
+	return buf.Len(), nil
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
 
 // createTestImage creates a simple test image
 func createTestImage(width, height int) image.Image {

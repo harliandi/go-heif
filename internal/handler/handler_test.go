@@ -15,9 +15,6 @@ func TestNew(t *testing.T) {
 	if h == nil {
 		t.Fatal("New() returned nil")
 	}
-	if h.targetSizeKB != 500 {
-		t.Errorf("Expected targetSizeKB 500, got %d", h.targetSizeKB)
-	}
 	if h.maxUploadMB != 10 {
 		t.Errorf("Expected maxUploadMB 10, got %d", h.maxUploadMB)
 	}
