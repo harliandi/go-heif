@@ -11,48 +11,44 @@ import (
 	"github.com/harliandi/go-heif/pkg/quality"
 	"image/jpeg"
 
-	turbojpeg "github.com/harliandi/go-heif/pkg/jpeg"
+	webp "github.com/chai2010/webp"
 )
 
 var (
 	ErrInvalidHEIF = errors.New("invalid HEIF file")
-	// UseTurboJPEG enables libjpeg-turbo encoding (3.8x faster)
-	// Set to false if libjpeg-turbo is not available
-	UseTurboJPEG = true
+	// UseTurboJPEG is kept for backward compatibility but currently unused
+	UseTurboJPEG = false
 )
 
-// Converter handles HEIF to JPEG conversion
+// Converter handles HEIF to JPEG/WebP conversion
 type Converter struct {
 	targetSizeKB int
+	outputFormat string // "jpeg" or "webp"
 }
 
-// encodeJPEG encodes an image to JPEG using turbo if available, otherwise stdlib
-func encodeJPEG(img image.Image, quality int, out *bytes.Buffer) (err error) {
-	// Try turbo encoder for YCbCr images (3.8x faster)
-	if UseTurboJPEG {
-		if ycbcr, ok := img.(*image.YCbCr); ok {
-			// Protect against CGO panics (segfaults from libjpeg-turbo)
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("TurboJPEG panic recovered, falling back to stdlib: %v", r)
-						err = errors.New("turbojpeg panic")
-					}
-				}()
-				data, turboErr := turbojpeg.EncodeYCbCr(ycbcr, quality)
-				if turboErr == nil {
-					_, err = out.Write(data)
-				} else {
-					err = turboErr
+// SetOutputFormat sets the output format ("jpeg" or "webp")
+func (c *Converter) SetOutputFormat(format string) {
+	c.outputFormat = format
+}
+
+// encodeImage encodes an image to JPEG or WebP based on outputFormat
+func encodeImage(img image.Image, quality int, format string, out *bytes.Buffer) error {
+	if format == "webp" {
+		// Convert to RGBA first for WebP encoding
+		var rgba *image.RGBA
+		if src, ok := img.(*image.RGBA); ok {
+			rgba = src
+		} else {
+			rgba = image.NewRGBA(img.Bounds())
+			for y := rgba.Rect.Min.Y; y < rgba.Rect.Max.Y; y++ {
+				for x := rgba.Rect.Min.X; x < rgba.Rect.Max.X; x++ {
+					rgba.Set(x, y, img.At(x, y))
 				}
-			}()
-			if err == nil {
-				return nil
 			}
-			// Fall through to stdlib on error or panic
 		}
+		return webp.Encode(out, rgba, &webp.Options{Quality: float32(quality)})
 	}
-	// Fallback to stdlib
+	// Default to JPEG
 	return jpeg.Encode(out, img, &jpeg.Options{Quality: quality})
 }
 
@@ -60,6 +56,7 @@ func encodeJPEG(img image.Image, quality int, out *bytes.Buffer) (err error) {
 func New(targetSizeKB int) *Converter {
 	return &Converter{
 		targetSizeKB: targetSizeKB,
+		outputFormat: "jpeg", // default to JPEG
 	}
 }
 
@@ -89,7 +86,7 @@ func (c *Converter) ConvertBytes(data []byte) ([]byte, error) {
 	// Encode as JPEG with optimized settings
 	var out bytes.Buffer
 	out.Grow(512 * 1024) // Pre-allocate for ~500KB
-	if err := encodeJPEG(img, q, &out); err != nil {
+	if err := encodeImage(img, q, c.outputFormat, &out); err != nil {
 		return nil, err
 	}
 
@@ -153,7 +150,7 @@ func (c *Converter) ConvertBytesWithQuality(data []byte, q int) ([]byte, error) 
 	// Encode as JPEG
 	var out bytes.Buffer
 	out.Grow(512 * 1024)
-	if err := encodeJPEG(img, q, &out); err != nil {
+	if err := encodeImage(img, q, c.outputFormat, &out); err != nil {
 		return nil, err
 	}
 
@@ -204,7 +201,7 @@ func (c *Converter) ConvertBytesFast(data []byte, scale float64) ([]byte, error)
 	// Encode as JPEG
 	var out bytes.Buffer
 	out.Grow(512 * 1024)
-	if err := encodeJPEG(scaled, fastModeQuality, &out); err != nil {
+	if err := encodeImage(scaled, fastModeQuality, c.outputFormat, &out); err != nil {
 		return nil, err
 	}
 
@@ -237,7 +234,7 @@ func (c *Converter) ConvertBytesFastWithQuality(data []byte, scale float64, q in
 	// Encode as JPEG
 	var out bytes.Buffer
 	out.Grow(512 * 1024)
-	if err := encodeJPEG(scaled, q, &out); err != nil {
+	if err := encodeImage(scaled, q, c.outputFormat, &out); err != nil {
 		return nil, err
 	}
 
@@ -309,11 +306,13 @@ func scaleYCbCrNearest(src, dst *image.YCbCr, srcW, srcH, dstW, dstH int) {
 		}
 	}
 
+	// IMPORTANT: YCbCr images with 4:2:0 subsampling already have Cb/Cr planes at half resolution!
+	// We must use the actual chroma dimensions from the image structures, not recalculate them.
 	// Scale chroma (Cb and Cr) at half resolution
-	cSrcW := srcW / 2
-	cSrcH := srcH / 2
-	cDstW := dstW / 2
-	cDstH := dstH / 2
+	cSrcW := src.Rect.Dx() / 2
+	cSrcH := src.Rect.Dy() / 2
+	cDstW := dst.Rect.Dx() / 2
+	cDstH := dst.Rect.Dy() / 2
 	cxRatio := (cSrcW << 16) / cDstW
 	cyRatio := (cSrcH << 16) / cDstH
 
@@ -331,9 +330,18 @@ func scaleYCbCrNearest(src, dst *image.YCbCr, srcW, srcH, dstW, dstH int) {
 }
 
 // scaleGenericNearest scales any image type using nearest-neighbor
+// Properly converts RGB to YCbCr to preserve colors
 func scaleGenericNearest(src image.Image, dst *image.YCbCr, srcW, srcH, dstW, dstH int) {
 	xRatio := (srcW << 16) / dstW
 	yRatio := (srcH << 16) / dstH
+
+	// First, collect all RGB samples for chroma calculation
+	type rgbSample struct {
+		r, g, b uint32
+	}
+	// We'll compute chroma at 2x2 blocks (420 subsampling)
+	cDstW := dstW / 2
+	cDstH := dstH / 2
 
 	for y := 0; y < dstH; y++ {
 		srcY := (y * yRatio) >> 16
@@ -342,15 +350,42 @@ func scaleGenericNearest(src image.Image, dst *image.YCbCr, srcW, srcH, dstW, ds
 		for x := 0; x < dstW; x++ {
 			srcX := (x * xRatio) >> 16
 			r, g, b, _ := src.At(srcX, srcY).RGBA()
-			// Convert RGB to YCbCr (simplified)
-			yVal := (19595*r + 38470*g + 7471*b + 1<<15) >> 24
+			// RGBA returns pre-multiplied values in range [0, 65535]
+			// Convert RGB to YCbCr using standard JPEG conversion formulas
+			// Y = 0.299*R + 0.587*G + 0.114*B
+			// Cb = -0.1687*R - 0.3313*G + 0.5*B + 128
+			// Cr = 0.5*R - 0.4187*G - 0.0813*B + 128
+
+			// Use fixed-point arithmetic for performance
+			// Y: (19595*R + 38470*G + 7471*B + 1<<15) >> 24 (but RGBA is 16-bit, not 8-bit)
+			// For 16-bit input: (19595*R + 38470*G + 7471*B + 1<<23) >> 24
+			r8 := r >> 8
+			g8 := g >> 8
+			b8 := b >> 8
+
+			yVal := (19595*r8 + 38470*g8 + 7471*b8 + 1<<15) >> 16
 			dst.Y[dstYOffset+x] = uint8(yVal)
 		}
 	}
 
-	// Set neutral chroma for simplicity
-	for i := range dst.Cb {
-		dst.Cb[i] = 128
-		dst.Cr[i] = 128
+	// Compute chroma (Cb, Cr) for each 2x2 block
+	for cy := 0; cy < cDstH; cy++ {
+		for cx := 0; cx < cDstW; cx++ {
+			// Sample the center of the 2x2 block in the source
+			srcX := ((cx * 2) * xRatio) >> 16
+			srcY := ((cy * 2) * yRatio) >> 16
+			r, g, b, _ := src.At(srcX, srcY).RGBA()
+			r8 := r >> 8
+			g8 := g >> 8
+			b8 := b >> 8
+
+			// Cb = -0.1687*R - 0.3313*G + 0.5*B + 128
+			cbVal := (int32(32768*b8) - int32(11056*r8) - int32(21712*g8))>>16 + 128
+			// Cr = 0.5*R - 0.4187*G - 0.0813*B + 128
+			crVal := (int32(32768*r8) - int32(27440*g8) - int32(5328*b8))>>16 + 128
+
+			dst.Cb[cy*dst.CStride+cx] = uint8(cbVal)
+			dst.Cr[cy*dst.CStride+cx] = uint8(crVal)
+		}
 	}
 }

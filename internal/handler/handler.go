@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/harliandi/go-heif/internal/converter"
+	"github.com/harliandi/go-heif/internal/storage"
 )
 
 const (
@@ -23,6 +24,7 @@ const (
 // Handler handles HTTP requests for image conversion
 type Handler struct {
 	converter   *converter.Converter
+	uploader    *storage.Uploader
 	maxUploadMB int
 	useWorkerPool bool
 }
@@ -34,6 +36,12 @@ func New(targetSizeKB, maxUploadMB int) *Handler {
 		maxUploadMB: maxUploadMB,
 		useWorkerPool: true, // Enable worker pool by default for better performance
 	}
+}
+
+// WithUploader sets the storage uploader for the handler
+func (h *Handler) WithUploader(uploader *storage.Uploader) *Handler {
+	h.uploader = uploader
+	return h
 }
 
 // Convert handles the /convert endpoint
@@ -104,6 +112,14 @@ func (h *Handler) Convert(w http.ResponseWriter, r *http.Request) {
 	// Check query parameters
 	query := r.URL.Query()
 
+	// Get output format (default: jpeg, options: jpeg, webp)
+	// Use "output" parameter to specify image format
+	outputFormat := query.Get("output")
+	if outputFormat != "webp" {
+		outputFormat = "jpeg" // default
+	}
+	h.converter.SetOutputFormat(outputFormat)
+
 	// Default scale is 0.5 (50% resolution) for speed
 	// Use scale=1 to get full resolution
 	var scale float64 = 0.5
@@ -173,13 +189,13 @@ func (h *Handler) Convert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check response format - default to binary for better performance
-	format := query.Get("format")
-	if format == "json" {
+	responseFormat := query.Get("format")
+	if responseFormat == "json" {
 		// Legacy base64 JSON response
-		h.sendJSONResponse(w, jpegData)
+		h.sendJSONResponse(w, jpegData, outputFormat)
 	} else {
-		// Default: stream raw JPEG binary (more efficient)
-		h.sendBinaryJPEGResponse(w, jpegData)
+		// Default: stream raw image binary (more efficient)
+		h.sendBinaryImageResponse(w, jpegData, outputFormat)
 	}
 }
 
@@ -252,20 +268,32 @@ func (h *Handler) convertFastWithQuality(w http.ResponseWriter, r *http.Request,
 	h.sendJPEGResponse(w, r, jpegData)
 }
 
-// sendJPEGResponse sends the JPEG data using format from query parameter
+// sendJPEGResponse sends the image data using format from query parameter
 func (h *Handler) sendJPEGResponse(w http.ResponseWriter, r *http.Request, data []byte) {
+	query := r.URL.Query()
+	outputFormat := query.Get("output")
+	if outputFormat != "webp" {
+		outputFormat = "jpeg"
+	}
+
 	// Check format parameter - default to binary for better performance
-	format := r.URL.Query().Get("format")
-	if format == "json" {
-		h.sendJSONResponse(w, data)
+	responseFormat := query.Get("format")
+	if responseFormat == "json" {
+		h.sendJSONResponse(w, data, outputFormat)
 	} else {
-		h.sendBinaryJPEGResponse(w, data)
+		h.sendBinaryImageResponse(w, data, outputFormat)
 	}
 }
 
-// sendBinaryJPEGResponse streams raw JPEG data (more efficient)
-func (h *Handler) sendBinaryJPEGResponse(w http.ResponseWriter, data []byte) {
-	w.Header().Set("Content-Type", "image/jpeg")
+// sendBinaryImageResponse streams raw image data (more efficient)
+func (h *Handler) sendBinaryImageResponse(w http.ResponseWriter, data []byte, outputFormat string) {
+	// Determine content type based on output format
+	contentType := "image/jpeg"
+	if outputFormat == "webp" {
+		contentType = "image/webp"
+	}
+
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("Cache-Control", "public, max-age=31536000") // 1 year cache
 	w.WriteHeader(http.StatusOK)
@@ -275,10 +303,19 @@ func (h *Handler) sendBinaryJPEGResponse(w http.ResponseWriter, data []byte) {
 	}
 }
 
-// sendJSONResponse sends the JPEG data as base64 in JSON response (legacy format)
-func (h *Handler) sendJSONResponse(w http.ResponseWriter, data []byte) {
+// sendBinaryJPEGResponse streams raw JPEG data (more efficient) - kept for compatibility
+func (h *Handler) sendBinaryJPEGResponse(w http.ResponseWriter, data []byte) {
+	h.sendBinaryImageResponse(w, data, "jpeg")
+}
+
+// sendJSONResponse sends the image data as base64 in JSON response
+func (h *Handler) sendJSONResponse(w http.ResponseWriter, data []byte, outputFormat string) {
 	base64Data := base64.StdEncoding.EncodeToString(data)
-	response := `{"data":"data:image/jpeg;base64,` + base64Data + `"}`
+	mimeType := "image/jpeg"
+	if outputFormat == "webp" {
+		mimeType = "image/webp"
+	}
+	response := `{"data":"data:` + mimeType + `;base64,` + base64Data + `"}`
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(response)))
@@ -295,6 +332,171 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
 		log.Printf("Failed to write health response: %v", err)
+	}
+}
+
+// ConvertAndStore handles the /convert/store endpoint
+// Converts HEIF to JPEG and uploads to Supabase Storage, returning the public URL
+func (h *Handler) ConvertAndStore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Check if uploader is configured
+	if h.uploader == nil {
+		log.Printf("Storage uploader not configured")
+		http.Error(w, "Storage not configured", http.StatusInternalServerError)
+		return
+	}
+
+	// Check for client cancellation early
+	select {
+	case <-r.Context().Done():
+		log.Printf("Request cancelled by client")
+		return
+	default:
+	}
+
+	// Parse multipart form with size limit
+	if err := r.ParseMultipartForm(int64(h.maxUploadMB) << 20); err != nil {
+		if errors.Is(err, http.ErrNotMultipart) {
+			http.Error(w, "Content-Type must be multipart/form-data", http.StatusBadRequest)
+		} else {
+			http.Error(w, "Request too large", http.StatusRequestEntityTooLarge)
+		}
+		return
+	}
+
+	// Get file from form
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "No file provided", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Validate file extension
+	if !isHEIFExtension(header.Filename) {
+		http.Error(w, "Not a HEIF/HEIC file (wrong extension)", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	// Read entire file into memory
+	fileData, err := io.ReadAll(file)
+	if err != nil {
+		log.Printf("Failed to read file: %v", err)
+		http.Error(w, "Failed to read file", http.StatusInternalServerError)
+		return
+	}
+
+	// Strict file size validation before processing
+	if err := converter.ValidateFile(fileData); err != nil {
+		log.Printf("File validation failed: %v", err)
+		if errors.Is(err, converter.ErrFileTooLarge) {
+			http.Error(w, "File too large (max 20MB)", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "Invalid file", http.StatusBadRequest)
+		}
+		return
+	}
+
+	// Validate file magic bytes
+	if !isValidHEIF(fileData) {
+		http.Error(w, "Invalid HEIF/HEIC file format", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	// Check query parameters
+	query := r.URL.Query()
+
+	// Get output format (default: jpeg, options: jpeg, webp)
+	outputFormat := query.Get("output")
+	if outputFormat != "webp" {
+		outputFormat = "jpeg"
+	}
+	h.converter.SetOutputFormat(outputFormat)
+
+	// Default scale is 0.5 (50% resolution) for speed
+	var scale float64 = 0.5
+	if scaleStr := query.Get("scale"); scaleStr != "" {
+		s, err := strconv.ParseFloat(scaleStr, 64)
+		if err == nil && s > 0 {
+			scale = s
+		}
+	}
+
+	// Get quality parameter (use adaptive quality by default)
+	var quality int = -1
+	if qualityStr := query.Get("quality"); qualityStr != "" {
+		q, err := strconv.Atoi(qualityStr)
+		if err == nil && q >= 1 && q <= 100 {
+			quality = q
+		}
+	}
+
+	// Convert the image
+
+	// Convert the image
+	var jpegData []byte
+	if scale > 0 && scale < 1.0 {
+		// Fast conversion with scaling
+		if h.useWorkerPool {
+			jpegData, err = converter.SubmitToGlobalPool(r.Context(), fileData, scale, quality)
+		} else {
+			if quality > 0 {
+				jpegData, err = h.converter.ConvertBytesFastWithQuality(fileData, scale, quality)
+			} else {
+				jpegData, err = h.converter.ConvertBytesFast(fileData, scale)
+			}
+		}
+	} else {
+		// Full resolution conversion
+		if h.useWorkerPool {
+			jpegData, err = converter.SubmitToGlobalPool(r.Context(), fileData, 1.0, quality)
+		} else {
+			if quality > 0 {
+				jpegData, err = h.converter.ConvertBytesWithQuality(fileData, quality)
+			} else {
+				jpegData, err = h.converter.ConvertBytes(fileData)
+			}
+		}
+	}
+
+	if err != nil {
+		log.Printf("Conversion error: %v", err)
+		if errors.Is(err, converter.ErrPoolBusy) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"Service busy, please retry"}`))
+			return
+		}
+		http.Error(w, "Conversion failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Upload to storage with correct format
+	var contentType string
+	if outputFormat == "webp" {
+		contentType = "image/webp"
+	} else {
+		contentType = "image/jpeg"
+	}
+	result, err := h.uploader.UploadWithFormat(r.Context(), jpegData, outputFormat, contentType)
+	if err != nil {
+		log.Printf("Upload error: %v", err)
+		http.Error(w, "Upload failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Return the public URL
+	response := `{"url":"` + result.URL + `"}`
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(response)))
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(response)); err != nil {
+		log.Printf("Failed to write response: %v", err)
 	}
 }
 

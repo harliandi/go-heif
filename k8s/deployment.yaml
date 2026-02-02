@@ -5,7 +5,12 @@ metadata:
   labels:
     app: go-heif-api
 spec:
-  replicas: 3
+  replicas: 1
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   selector:
     matchLabels:
       app: go-heif-api
@@ -15,39 +20,45 @@ spec:
         app: go-heif-api
     spec:
       containers:
-      - name: api
-        image: go-heif-api
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 8080
-          name: http
-        env:
-        - name: PORT
-          value: "8080"
-        - name: MAX_UPLOAD_MB
-          value: "10"
-        - name: TARGET_SIZE_KB
-          value: "500"
-        resources:
-          requests:
-            cpu: 250m
-            memory: 256Mi
-          limits:
-            cpu: 500m
-            memory: 512Mi
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 3
+        - name: api
+          image: asia-southeast1-docker.pkg.dev/saruberoz/parkee-app/staging/go-heif-api
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: PORT
+              value: "8080"
+            - name: MAX_UPLOAD_MB
+              value: "10"
+            - name: TARGET_SIZE_KB
+              value: "500"
+            - name: SUPABASE_URL
+              value: "https://slphnjnxcbhkuixjsnpp.supabase.co"
+            - name: SUPABASE_KEY
+              value: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNscGhuam54Y2Joa3VpeGpzbnBwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTczMTAzMiwiZXhwIjoyMDg1MzA3MDMyfQ.TE1ToIEi8IO8gB3k2pH3VUHTnWswDTifjjF_Njnvq70"
+            - name: SUPABASE_BUCKET
+              value: "heif-upload"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3

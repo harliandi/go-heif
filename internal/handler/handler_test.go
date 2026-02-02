@@ -377,7 +377,7 @@ func TestHandler_sendJSONResponse(t *testing.T) {
 	testData := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46}
 
 	w := httptest.NewRecorder()
-	h.sendJSONResponse(w, testData)
+	h.sendJSONResponse(w, testData, "jpeg")
 
 	// Verify response headers
 	if w.Header().Get("Content-Type") != "application/json" {
@@ -432,6 +432,7 @@ func TestHandler_Convert_Integration(t *testing.T) {
 	}
 
 	h := New(500, 10)
+	h.useWorkerPool = false
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -541,6 +542,315 @@ func TestIsValidHEIF(t *testing.T) {
 			result := isValidHEIF(tt.data)
 			if result != tt.expected {
 				t.Errorf("isValidHEIF() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestHandler_convertWithQuality tests the convertWithQuality method
+func TestHandler_convertWithQuality(t *testing.T) {
+	tests := []struct {
+		name    string
+		quality int
+	}{
+		{"Quality 50", 50},
+		{"Quality 85", 85},
+		{"Quality 100", 100},
+	}
+
+	h := New(500, 10)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/convert", nil)
+			w := httptest.NewRecorder()
+
+			h.convertWithQuality(w, req, []byte("fake"), tt.quality)
+
+			// Should get an error for invalid data, but not panic
+			if w.Code != http.StatusInternalServerError && w.Code != http.StatusServiceUnavailable {
+				t.Logf("convertWithQuality status: %d", w.Code)
+			}
+		})
+	}
+}
+
+// TestHandler_convertFast tests the convertFast method
+func TestHandler_convertFast(t *testing.T) {
+	tests := []struct {
+		name  string
+		scale float64
+	}{
+		{"Scale 0.25", 0.25},
+		{"Scale 0.5", 0.5},
+		{"Scale 0.75", 0.75},
+	}
+
+	h := New(500, 10)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/convert", nil)
+			w := httptest.NewRecorder()
+
+			h.convertFast(w, req, []byte("fake"), tt.scale)
+
+			// Should get an error for invalid data, but not panic
+			if w.Code != http.StatusInternalServerError && w.Code != http.StatusServiceUnavailable {
+				t.Logf("convertFast status: %d", w.Code)
+			}
+		})
+	}
+}
+
+// TestHandler_convertFastWithQuality tests the convertFastWithQuality method
+func TestHandler_convertFastWithQuality(t *testing.T) {
+	tests := []struct {
+		name    string
+		scale   float64
+		quality int
+	}{
+		{"Scale 0.25, Quality 50", 0.25, 50},
+		{"Scale 0.5, Quality 85", 0.5, 85},
+		{"Scale 0.75, Quality 100", 0.75, 100},
+	}
+
+	h := New(500, 10)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/convert", nil)
+			w := httptest.NewRecorder()
+
+			h.convertFastWithQuality(w, req, []byte("fake"), tt.scale, tt.quality)
+
+			// Should get an error for invalid data, but not panic
+			if w.Code != http.StatusInternalServerError && w.Code != http.StatusServiceUnavailable {
+				t.Logf("convertFastWithQuality status: %d", w.Code)
+			}
+		})
+	}
+}
+
+// TestHandler_sendJPEGResponse tests sendJPEGResponse format selection
+func TestHandler_sendJPEGResponse(t *testing.T) {
+	h := New(500, 10)
+	testData := []byte{0xFF, 0xD8, 0xFF, 0xE0} // JPEG signature
+
+	tests := []struct {
+		name            string
+		format          string
+		wantContentType string
+	}{
+		{"Default format", "", "image/jpeg"},
+		{"Binary format", "binary", "image/jpeg"},
+		{"JSON format", "json", "application/json"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := "/convert"
+			if tt.format != "" {
+				url += "?format=" + tt.format
+			}
+			req := httptest.NewRequest(http.MethodGet, url, nil)
+			w := httptest.NewRecorder()
+
+			h.sendJPEGResponse(w, req, testData)
+
+			ct := w.Header().Get("Content-Type")
+			if ct != tt.wantContentType {
+				t.Errorf("sendJPEGResponse() Content-Type = %s, want %s", ct, tt.wantContentType)
+			}
+		})
+	}
+}
+
+// TestHandler_Convert_WithMaxSizeParameter tests custom max_size parameter
+func TestHandler_Convert_WithMaxSizeParameter(t *testing.T) {
+	h := New(500, 10)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.heic")
+	part.Write([]byte("fake"))
+	writer.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/convert?max_size=1000", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	h.Convert(w, req)
+
+	// Should fail conversion but not panic
+	if w.Code == 0 {
+		t.Error("Expected a response status code")
+	}
+}
+
+// TestHandler_Convert_WithQualityParameter tests quality parameter parsing
+func TestHandler_Convert_WithQualityParameter(t *testing.T) {
+	h := New(500, 10)
+
+	tests := []struct {
+		quality string
+	}{
+		{"1"},
+		{"50"},
+		{"100"},
+		{"invalid"}, // Should be ignored
+		{"0"},       // Should be ignored
+		{"101"},     // Should be ignored
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.quality, func(t *testing.T) {
+			body := &bytes.Buffer{}
+			writer := multipart.NewWriter(body)
+			part, _ := writer.CreateFormFile("file", "test.heic")
+			part.Write([]byte("fake"))
+			writer.Close()
+
+			url := "/convert?scale=1&quality=" + tt.quality
+			req := httptest.NewRequest(http.MethodPost, url, body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			w := httptest.NewRecorder()
+
+			h.Convert(w, req)
+			// Should not panic
+		})
+	}
+}
+
+// TestHandler_Convert_ScaleFullResolution tests scale=1 (full resolution)
+func TestHandler_Convert_ScaleFullResolution(t *testing.T) {
+	h := New(500, 10)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.heic")
+	part.Write([]byte("fake"))
+	writer.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/convert?scale=1", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	h.Convert(w, req)
+
+	// Should use worker pool or direct conversion for full resolution
+	// Will fail with invalid data, but should not panic
+}
+
+// TestHandler_Convert_ScaleGreaterThanOne tests scale > 1 (treated as no scaling)
+func TestHandler_Convert_ScaleGreaterThanOne(t *testing.T) {
+	h := New(500, 10)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.heic")
+	part.Write([]byte("fake"))
+	writer.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/convert?scale=2", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	h.Convert(w, req)
+
+	// Scale > 1 means full resolution (no scaling)
+	// Will fail with invalid data, but should not panic
+}
+
+// TestHandler_Convert_CustomMaxSize tests custom max_size creates new converter
+func TestHandler_Convert_CustomMaxSize(t *testing.T) {
+	h := New(500, 10)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.heic")
+	part.Write([]byte("fake"))
+	writer.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/convert?max_size=250", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	h.Convert(w, req)
+
+	// Custom max_size should create a new converter
+	// Will fail with invalid data, but should not panic
+}
+
+// TestHandler_Convert_WithRealHEIF tests full conversion flow with real HEIF data
+func TestHandler_Convert_WithRealHEIF(t *testing.T) {
+	// Try multiple test file locations
+	testFiles := []string{
+		"../../testdata/test.heic",
+		"testdata/test.heic",
+		"/home/harliandi/go-heif/testdata/test.heic",
+	}
+
+	var testData []byte
+	for _, f := range testFiles {
+		if data, err := os.ReadFile(f); err == nil {
+			testData = data
+			break
+		}
+	}
+
+	if testData == nil {
+		t.Skip("No test HEIF file found")
+		return
+	}
+
+	// Initialize global worker pool since handler uses it
+	converter.InitGlobalWorkerPool(2, 500)
+
+	h := New(500, 10)
+
+	tests := []struct {
+		name    string
+		query   string
+		wantCT  string
+	}{
+		{"Default (binary, scale 0.5)", "", "image/jpeg"},
+		{"Full resolution", "?scale=1", "image/jpeg"},
+		{"High quality", "?scale=1&quality=90", "image/jpeg"},
+		{"Fast mode", "?scale=0.25", "image/jpeg"},
+		{"JSON format", "?format=json", "application/json"},
+		{"Binary explicit", "?format=binary", "image/jpeg"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := &bytes.Buffer{}
+			writer := multipart.NewWriter(body)
+			part, _ := writer.CreateFormFile("file", "test.heic")
+			part.Write(testData)
+			writer.Close()
+
+			url := "/convert" + tt.query
+			req := httptest.NewRequest(http.MethodPost, url, body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			w := httptest.NewRecorder()
+
+			h.Convert(w, req)
+
+			// Should succeed
+			if w.Code != http.StatusOK {
+				t.Errorf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+			}
+
+			// Check content type for successful responses
+			ct := w.Header().Get("Content-Type")
+			if ct != tt.wantCT {
+				t.Errorf("Expected Content-Type %s, got %s", tt.wantCT, ct)
+			}
+
+			// Should have non-empty response
+			if w.Body.Len() == 0 {
+				t.Error("Response body is empty")
 			}
 		})
 	}

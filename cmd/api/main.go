@@ -11,6 +11,7 @@ import (
 	"github.com/harliandi/go-heif/internal/converter"
 	"github.com/harliandi/go-heif/internal/handler"
 	"github.com/harliandi/go-heif/internal/middleware"
+	"github.com/harliandi/go-heif/internal/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -22,8 +23,21 @@ func main() {
 
 	h := handler.New(cfg.TargetSizeKB, cfg.MaxUploadMB)
 
+	// Initialize storage client if Supabase is configured
+	if os.Getenv("SUPABASE_URL") != "" && os.Getenv("SUPABASE_KEY") != "" && os.Getenv("SUPABASE_BUCKET") != "" {
+		storageClient, err := storage.NewClient(storage.Config{})
+		if err != nil {
+			log.Printf("Failed to initialize storage client: %v", err)
+		} else {
+			uploader := storage.NewUploader(storageClient)
+			h.WithUploader(uploader)
+			log.Printf("Storage enabled: bucket=%s", os.Getenv("SUPABASE_BUCKET"))
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/convert", h.Convert)
+	mux.HandleFunc("/convert/store", h.ConvertAndStore)
 	mux.HandleFunc("/health", h.Health)
 	mux.Handle("/metrics", promhttp.Handler())
 
